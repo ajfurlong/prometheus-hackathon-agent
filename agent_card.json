@@ -25,7 +25,7 @@
           },
           "table_query": {
             "type": "string",
-            "description": "User description of the wanted table by subject or caption; preserve their wording. Optional when the document has one table."
+            "description": "User description of the wanted table by subject or caption; preserve their wording."
           }
         },
         "required": [
