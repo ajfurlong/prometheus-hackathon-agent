@@ -11,7 +11,7 @@
       "id": "team1_extract_table",
       "name": "Team 1: extract a captioned table",
       "description": "Find the table described by the user in an uploaded Markdown document and publish it as a CSV table artifact with exact headers and values.",
-      "usage_notes": "Use for extracting a table from a .md upload, including population, rainfall, temperature, or other caption descriptions. Pass document_artifact_id and the natural-language table_query. For a request to extract AND plot, call this first, then pass the returned artifact_id to team1_plot_table; do not ask for a CSV first. Never use this for CSV uploads.",
+      "usage_notes": "Use for extracting a table from a .md upload, including caption descriptions. Pass document_artifact_id and the natural-language table_query. For a request to extract AND plot, call this first, then pass the returned artifact_id to team1_plot_table; do not ask for a CSV first. Never use this for CSV uploads.",
       "requires_approval": false,
       "expected_duration_seconds": 10,
       "output_format": "JSON with artifact_id, table_artifact_id, caption, columns, numeric_columns and row_count; emits a text/csv table artifact.",
