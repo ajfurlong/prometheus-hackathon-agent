@@ -1,29 +1,113 @@
 {
-  "name": "Markdown table extractor Agent",
-  "description": "A specialized agent for markdown table extractor",
+  "name": "Team 1 Table and Plot Agent",
+  "description": "Extract tables by caption from uploaded Markdown, plot chosen columns from table artifacts or uploaded CSV/TSV, and list available tables. Parsing is deterministic; semantic matching never invents data.",
   "version": "1.0.0",
   "capabilities": {
-    "streaming": false,
+    "streaming": true,
     "pushNotifications": false
   },
   "skills": [
     {
-      "id": "markdown_table_extractor_analysis",
-      "name": "Markdown table extractor Analysis",
-      "description": "Performs analysis using markdown table extractor",
-      "usage_notes": "When to use this skill vs. other available skills.",
+      "id": "team1_extract_table",
+      "name": "Team 1: extract a captioned table",
+      "description": "Find the table described by the user in an uploaded Markdown document and publish it as a CSV table artifact with exact headers and values.",
+      "usage_notes": "Use for extracting a table from a .md upload, including caption descriptions. Pass document_artifact_id and the natural-language table_query. For a request to extract AND plot, call this first, then pass the returned artifact_id to team1_plot_table; do not ask for a CSV first. Never use this for CSV uploads.",
       "requires_approval": false,
-      "expected_duration_seconds": 30,
-      "output_format": "JSON with keys: status, input_received, message",
+      "expected_duration_seconds": 10,
+      "output_format": "JSON with artifact_id, table_artifact_id, caption, columns, numeric_columns and row_count; emits a text/csv table artifact.",
       "inputSchema": {
         "type": "object",
         "properties": {
-          "input_data": {
+          "document_artifact_id": {
             "type": "string",
-            "description": "The main input data to process."
+            "x_artifact_ref": "single",
+            "description": "Uploaded Markdown document artifact ID in this conversation."
+          },
+          "table_query": {
+            "type": "string",
+            "description": "User description of the wanted table by subject or caption; preserve their wording."
           }
         },
-        "required": ["input_data"]
+        "required": [
+          "document_artifact_id"
+        ]
+      }
+    },
+    {
+      "id": "team1_plot_table",
+      "name": "Team 1: plot tabular data",
+      "description": "Render a PNG plot from an extracted table artifact or an uploaded CSV/TSV. Match requested column names and ask with actual column dropdowns when unspecified.",
+      "usage_notes": "Use directly for CSV/TSV uploads. For Markdown, use team1_extract_table first and pass its artifact_id here. Supply exact x_column and y_columns when known, or put the original user plot request in plot_query. Leave axes absent for vague requests such as plot this; the skill loads the file and asks dropdown questions offering its real columns. Do not guess axes or fill all numeric columns for an unspecified plot. Use y_columns for multiple series such as each village. Never pass file contents as parameters.",
+      "requires_approval": false,
+      "expected_duration_seconds": 15,
+      "output_format": "JSON with PNG artifact_id, selected x_column/y_columns, chart_type, rows, missing_values and x_rows_omitted; emits an image/png artifact.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "table_artifact_id": {
+            "type": "string",
+            "x_artifact_ref": "single",
+            "description": "CSV/TSV upload or table artifact ID returned by extraction."
+          },
+          "plot_query": {
+            "type": "string",
+            "description": "Original natural-language plotting request, including the desired series and axes. For plot this, pass that wording and leave axes absent."
+          },
+          "x_column": {
+            "type": "string",
+            "description": "Requested x-axis column or semantic name, only if explicitly specified by the user."
+          },
+          "y_columns": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            },
+            "description": "Requested numeric y-axis column names; may contain several series. Only fill when requested."
+          },
+          "y_column": {
+            "type": "string",
+            "description": "One numeric y-axis column; used when answering the agent dropdown."
+          },
+          "chart_type": {
+            "type": "string",
+            "enum": [
+              "auto",
+              "line",
+              "scatter",
+              "bar"
+            ],
+            "description": "Optional style. Auto selects line for time, scatter for numeric comparisons, or bar for categories."
+          },
+          "title": {
+            "type": "string",
+            "description": "Optional title explicitly requested by the user; otherwise use the table caption."
+          }
+        },
+        "required": [
+          "table_artifact_id"
+        ]
+      }
+    },
+    {
+      "id": "team1_list_tables",
+      "name": "Team 1: list document tables",
+      "description": "List actual captions, column names and row counts for every table in an uploaded Markdown file.",
+      "usage_notes": "Use when the user asks what tables are available or needs help choosing a table; does not plot or invent data.",
+      "requires_approval": false,
+      "expected_duration_seconds": 3,
+      "output_format": "JSON listing captions, columns, rows and source_line.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {
+          "document_artifact_id": {
+            "type": "string",
+            "x_artifact_ref": "single",
+            "description": "Uploaded Markdown document artifact ID."
+          }
+        },
+        "required": [
+          "document_artifact_id"
+        ]
       }
     }
   ]

@@ -10,7 +10,7 @@
 #
 # SPDX-License-Identifier: MIT
 
-"""Shared fixtures for Markdown table extractor agent tests.
+"""Shared fixtures for Team 1 Table and Plot agent tests.
 
 `RequestContext` and `EventQueue` are mocked, so `_execute` can be exercised
 directly without an HTTP server, Redis, or the A2A registry. This mirrors the

@@ -1,4 +1,17 @@
 COMPOSE := docker compose
+
+SDK_PATH ?= ../prometheus_core/sdk
+.PHONY: dev-setup test lint
+dev-setup:
+	uv sync
+	uv pip install -e "$(SDK_PATH)"
+
+test:
+	uv run pytest
+
+lint:
+	uv run ruff check .
+
 UNAME   := $(shell uname)
 
 COMPOSE_BASE := docker-compose.yml

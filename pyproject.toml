@@ -1,9 +1,10 @@
 [project]
-name = "markdown-table-extractor-agent"
+name = "team1-table-plot-agent"
 version = "0.1.0"
-description = "A specialized agent for markdown table extractor"
+description = "Extract captioned Markdown tables deterministically and plot selected columns from tables or CSV uploads."
 requires-python = ">=3.12"
 dependencies = [
+    "matplotlib>=3.9,<4",
     # List only packages YOUR agent code imports directly.
     #
     # prometheus_api (and a2a, starlette, uvicorn) are already installed in the
@@ -30,6 +31,7 @@ dev = [
 # Async tests do not need @pytest.mark.asyncio.
 asyncio_mode = "auto"
 testpaths = ["tests"]
+pythonpath = ["."]
 
 [tool.ruff]
 line-length = 100

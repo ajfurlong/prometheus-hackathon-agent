@@ -1,5 +1,5 @@
 services:
-  markdown-table-extractor-agent:
+  team1-table-plot-agent:
     ports:
       - "${EXTERNAL_AGENT_PORT}:${AGENT_PORT:-8000}"
     environment:

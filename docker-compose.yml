@@ -1,5 +1,5 @@
 services:
-  markdown-table-extractor-agent:
+  team1-table-plot-agent:
     build:
       context: .
       args:
@@ -11,7 +11,7 @@ services:
         HTTP_PROXY: ${HTTP_PROXY:-}
         HTTPS_PROXY: ${HTTPS_PROXY:-}
         NO_PROXY: ${NO_PROXY:-}
-    container_name: markdown-table-extractor-agent
+    container_name: team1-table-plot-agent
     networks:
       - agent-network
     environment:
@@ -34,7 +34,7 @@ services:
       # Defaults to the platform backend's own JWKS endpoint, reachable by
       # container name when joining the platform's Docker network (the
       # default -- see EXTERNAL_AGENT_HOST above); override for external mode
-      # or a genuinely third-party deployment (see .env.example).
+      # or a third-party deployment (see README configuration instructions).
       JWKS_URL: ${JWKS_URL:-http://backend:8000/.well-known/jwks.json}
       USER_IDENTITY_PUBLIC_KEY: ${USER_IDENTITY_PUBLIC_KEY:-}
       USER_IDENTITY_ISS: ${USER_IDENTITY_ISS:-prometheus-platform}
@@ -62,7 +62,7 @@ services:
 
       # Optional runtime tuning. Forwarded as empty when unset; prometheus_api
       # treats empty as "use the default", so the defaults are defined in one
-      # place only (there and not here). See .env.example for what each does.
+      # place only (there and not here). See the SDK docs for each setting.
       CREDENTIAL_BROKER: ${CREDENTIAL_BROKER:-}
       REGISTRY_MAX_RETRIES: ${REGISTRY_MAX_RETRIES:-}
       PROMETHEUS_TASK_STORE: ${PROMETHEUS_TASK_STORE:-}
