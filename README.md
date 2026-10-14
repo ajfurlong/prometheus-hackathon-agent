@@ -1,83 +1,96 @@
 # Team 1 Table and Plot Agent
 
-A general-purpose table extraction and plotting agent for Team 1, built with `prometheus_core/agent-template/setup_agent.py` and subclassing `PrometheusAgent`. It accepts rectangular tables from different domains: UTF-8 GitHub-flavoured Markdown with captions, CSV/TSV, or compatible table JSON. The supplied Hollowmere file is a demo and test fixture; the parser has no dataset-specific rules.
+Extract captioned Markdown tables and plot CSV/TSV or table artifacts through Prometheus. Parsing preserves source cells deterministically; semantic matching selects only from actual captions and headers. Team 1 includes contributors from ORNL, INL and Sandia.
 
 ## Skills
 
-| Skill ID | Input | Output |
-|---|---|---|
-| `team1_extract_table` | Markdown artifact ID and a caption/subject description | A CSV table artifact, exact headers/values, caption and row count |
-| `team1_plot_table` | Extracted table artifact or uploaded CSV/TSV; requested axes | A PNG artifact stored in DeepLynx |
-| `team1_list_tables` | Markdown artifact ID | Actual captions, columns, row counts and source lines |
+| Skill ID              | Input                                   | Output                     |
+| --------------------- | --------------------------------------- | -------------------------- |
+| `team1_extract_table` | Markdown artifact and table description | Exact CSV table artifact   |
+| `team1_plot_table`    | Table/CSV artifact and requested axes   | PNG artifact in DeepLynx   |
+| `team1_list_tables`   | Markdown artifact                       | Captions, headers and rows |
 
-The card is **Team 1 Table and Plot Agent**; the Docker container is `team1-table-plot-agent`. The agent joins the existing `prometheus_platform_agent-network` and registers itself. No platform source changes are required.
+The Docker container is `team1-table-plot-agent`. It joins `prometheus_platform_agent-network` and registers its card and workflow, `team1.extract_then_plot`, through the SDK.
 
-## Approach
+## Organization
 
-`tables.py` deterministically scans GitHub-flavoured Markdown tables. It associates the immediately preceding bold caption, including multiline captions and captions followed by prose. It ignores fenced code, recognizes alignment separators, handles escaped pipes, validates row widths and unique headers, and retains original cell strings. CSV/TSV use Python's standard `csv` parser, including quoted commas and quotes.
+| Module               | Responsibility                                             |
+| -------------------- | ---------------------------------------------------------- |
+| `markdown_parser.py` | Captioned GFM Markdown → `TableData`                       |
+| `table_data.py`      | Validated table structure, CSV serialization and numbers   |
+| `plotting.py`        | `TableData` → PNG with labels, units and missing-data gaps |
+| `matching.py`        | Lexical matching and bounded LLM selection                 |
+| `capabilities.py`    | Extract, list and plot skill coordination                  |
+| `artifact_io.py`     | SDK artifact storage, file reads and follow-up prompts     |
+| `agent.py`           | A2A dispatch and conversation resume                       |
+| `tests/`             | Offline pytest regression tests                            |
+| `scripts/`           | Manual platform/DeepLynx smoke checks                      |
 
-`matching.py` first matches exact headers, caption words and common semantic synonyms. It distinguishes `t` from `T` and understands units such as `[min]` and `[K]`. When the user's description remains ambiguous, one forced LLM tool call may choose among actual captions/headers; row values are never sent to the model. Invalid names or indices are rejected. If the model is unavailable or cannot match, the agent asks rather than fabricating data.
+The parser ignores fenced code, supports wrapped bold captions and escaped pipes, and rejects malformed rows. `TableData` retains headers and original cell strings; its CSV reader handles quoting, BOMs and comma/semicolon/tab delimiters.
 
-`plotting.py` uses Matplotlib's Agg backend and isolated figures. It supports line, scatter and grouped-bar plots, original axis labels/units, legends for multiple series, and separate panels for incompatible y units. Units come from the column headers; caption words do not imply units. Thousands separators and Unicode minus signs are recognized only for plotting. Missing values remain intact in CSV output and become gaps in lines; no interpolation or imputation occurs. Numeric x values are sorted for plotting, without altering extracted rows. Rendering runs in a worker thread.
+Matching first checks exact headers and generic lexical overlap. It preserves case-sensitive symbols, without dictionaries that assign topics or meanings to them. Paraphrases and symbols with units use one bounded LLM tool call over real candidates; row values are never sent to the model. Ambiguous requests produce actual-caption or actual-column choices. Extraction parses all tables before deciding whether there is a single candidate.
 
-For **plot this**, axes stay optional in the card so the skill can read the file and offer dropdowns of its real columns. The follow-up stores selectors in conversation state and reloads the source on resume. `y_columns` supports multiple explicitly requested series; the dropdown chooses one series.
-
-CSV output uses `text/csv`, which the current platform renders as a table. PNG output uses `image/png`, which renders as an image. Both are cataloged DeepLynx artifacts and pass between skills by artifact ID, never by copying table contents into prompts. A published workflow, `team1.extract_then_plot`, also chains the two skills.
+Plots support line, scatter and grouped bars. Time-like axis metadata informs automatic style; explicit `chart_type` overrides it. Numeric x values are sorted only for plotting. Missing readings remain gaps and incompatible y units use separate panels. Rendering uses isolated Matplotlib Agg figures in a worker thread.
 
 ## Setup and run
 
-From this repository's root, with `prometheus_core` checked out alongside it:
+Requires Python 3.12+, uv, and a compatible Prometheus SDK. With `prometheus_core` checked out alongside this repository:
 
 ```sh
 make dev-setup
 uv run pytest
 uv run ruff check .
+```
+
+If the SDK is elsewhere, use `make dev-setup SDK_PATH=/path/to/prometheus_core/sdk`. The Docker base image already supplies the SDK; it is deliberately not duplicated in `pyproject.toml`.
+
+Create the ignored `.env` from the platform using its standard agent setup helper:
+
+```sh
+uv run python ../prometheus_core/agent-template/setup_agent.py --env-only .
+```
+
+The helper selects agent credentials from the platform rather than copying its private signing key. Review the local configuration; it must match the platform's storage, identity and inference setup. Never commit `.env` or print resolved LLM settings.
+
+Required configuration includes:
+
+- SDK base image repository/tag compatible with the platform.
+- Matching `AGENT_SECRET`, `LITELLM_MASTER_KEY`, `REDIS_PASSWORD` and service URLs.
+- `DEEPLYNX_*` storage connection settings for uploads and generated artifacts.
+- `LLM_CONFIG_PROFILE` and its provider key, where applicable.
+- The platform's identity verifier settings (`JWKS_URL` or public key, issuer/audience).
+
+Start the platform first, then run:
+
+```sh
 make up
 ```
 
-`make dev-setup` installs the agent dependencies and the local SDK in its isolated environment. If the SDK is elsewhere, supply its path: `make dev-setup SDK_PATH=/path/to/prometheus_core/sdk`. The SDK must match the platform image; it is intentionally not a runtime dependency because the template's base image already provides it. Python 3.12+ and uv are required for local development.
+This rebuilds and starts this agent only. `make down` stops it; `make logs` tails its logs. External mode requires both `EXTERNAL_AGENT_HOST` and `EXTERNAL_AGENT_PORT`. Run one checkout at a time because all copies use the same container name.
 
-For Docker, `.env` selects the SDK base image, inference profile and shared platform credentials. This workspace's ignored `.env` was copied from the existing platform setup and uses the local SDK and Azure profile. Never commit this file. A fresh checkout can copy `.env.example` to `.env`, then use the template's `setup_agent.py --env-only /path/to/agent` or configure the variables below directly.
-
-Required settings:
-
-- `PROMETHEUS_API_BASE_IMAGE_REPO` and `PROMETHEUS_API_BASE_IMAGE_HASH`: an SDK image compatible with the platform; this workspace uses `prometheus_api:local`.
-- `AGENT_SECRET`, `LITELLM_MASTER_KEY`, `REDIS_PASSWORD`: match the running platform.
-- `REGISTRY_URL`, `REDIS_URL`: the existing platform network addresses.
-- `DEEPLYNX_BASE_URL`, `DEEPLYNX_KEY`, `DEEPLYNX_SECRET`, `DEEPLYNX_ORG_ID`, `DEEPLYNX_PROJECT_ID`: the same storage configuration as the platform.
-- `LLM_CONFIG_PROFILE` and its provider key: this demo uses `azure` and `OPENAI_API_KEY`. Deterministic local parsing/plotting needs no LLM key.
-- `JWKS_URL` or the platform's public identity key, issuer/audience and `USER_IDENTITY_REQUIRED`: match the platform's identity configuration. Never copy its private signing key.
-
-The template Makefile supports internal mode (default) or external mode with both `EXTERNAL_AGENT_HOST` and `EXTERNAL_AGENT_PORT`. `make down` stops only this agent. After adding/changing its card or workflow, refresh orchestrator discovery or wait for automatic refresh. `/agents` should show the Team 1 card.
-
-If the same agent is already running from another checkout, stop that copy with `make down` in its directory before starting this one. Both use the container name `team1-table-plot-agent`.
-
-## Demo in chat
-
-The demo uploads are included under `tests/fixtures/`. Use a fresh conversation for each test:
-
-1. Upload `hollowmere_almanac.md`. Ask: **Extract the table with population data and plot the population of each village over time.** Expect a 15-row table and a line plot of Thistledown, Mossbury and Pebblewick from 2010 to 2024, excluding the aggregate Total column.
-2. Upload `demo_sightings.csv`. Ask: **Plot this file.** Choose `night` for x and `mice_sighted` for y in the actual-column dropdowns.
-3. Upload `symbolic_report.md`. Ask: **Extract the heating measurements table and plot temperature against time.** Expect `t [min]` vs `T [K]`, with a gap for the missing reading.
-4. Ask to list tables, or request a nonexistent table. Expect real caption choices or a clear message.
-
-Offline, run `make demo` to write the population CSV, structured JSON and PNG under the ignored `demo-output/` directory. The same parser/plotter also have generic commands:
+For standalone development, use the same SDK entry point:
 
 ```sh
-uv run python cli.py list tests/fixtures/hollowmere_almanac.md
-uv run python cli.py extract report.md --query population --output output/population
-uv run python cli.py plot output/population.json --x Year --y Village_A Village_B --output output/population.png
-uv run python cli.py plot measurements.csv --x time --y temperature --output output/temperature.png
+uv run python agent.py
 ```
 
-`live_verify.py` exercises uploaded files through the normal platform orchestrator using its existing system-test A2A helper. It does not call the Team 1 skills directly or prescribe an execution plan. It runs in an ephemeral test container with `/tests/system`, `/dataset`, and `/results` mounts. It prints only sanitized progress/results and saves a verification report.
+When running directly on the host, configure registry, Redis, identity and storage URLs reachable from the host rather than Docker-only service names. Requests use the standard A2A interface and configured authentication.
 
-## Tests and limits
+## Verification
 
-Tests cover the actual almanac, wrapped captions, escaped pipes, fenced examples, CSV quoting/BOM/delimiters, thousands separators, missing data, malformed rows, symbol matching, mocked LLM decisions, PNG generation, honest labels and input-required resume. Files are limited to 8 MB; only UTF-8 Markdown/CSV/TSV or compatible inline table JSON are accepted. Headers must be unique and nonempty, rows must have consistent widths, and y columns must contain numeric or recognized missing values. Excel workbooks, PDFs and scanned tables need a separate reader. Arbitrary text/currency/unit conversion and approximate value extraction are not attempted.
+Offline checks are in `tests/`. Manual system checks are documented in [scripts/README.md](scripts/README.md); they exercise the orchestrator and real DeepLynx artifact downloads.
 
-The team repository is [nshoman/prometheus-hackathon-agent](https://github.com/nshoman/prometheus-hackathon-agent), with your fork at [ajfurlong/prometheus-hackathon-agent](https://github.com/ajfurlong/prometheus-hackathon-agent). The table-and-plot implementation is maintained on branch `table-plot-agent`; `origin` points to your fork and `upstream` points to the team repository. Validation and the remaining submission requirements are tracked in [SUBMISSION.md](SUBMISSION.md).
+The demo uploads are bundled in `tests/fixtures/`. Use a fresh Prometheus conversation:
 
-## Attribution
+1. Upload `hollowmere_almanac.md`: **Extract the population table and plot each village over time.**
+2. Upload `demo_sightings.csv`: **Plot this file.** Choose `night` and `mice_sighted` from the actual-column dropdowns.
+3. Upload `symbolic_report.md`: **Extract the heating measurements and plot temperature against time.**
+4. Ask to list tables or choose a nonexistent caption; expect real choices or a clear error.
 
-Agent plumbing comes from the Prometheus agent template and SDK (Battelle Energy Alliance, MIT license; see the upstream LICENSE/NOTICE). Deterministic table matching and plotting logic were implemented for this challenge. Plotting uses Matplotlib; CSV parsing uses Python's standard library. The Hollowmere and lunar-cheese practice datasets come from the provided challenge materials.
+These are fixtures, not runtime matching rules. New documents need no code changes when they follow the same table contract.
+
+## Limits and attribution
+
+Accepts UTF-8 Markdown/CSV/TSV and compatible table JSON up to 8 MB. Headers must be unique and nonempty; row widths must agree. Y columns must contain numbers or documented missing markers. Excel, PDFs, scans, currency/unit conversion and approximate extraction need separate capabilities.
+
+The template and SDK come from Prometheus, licensed under MIT; see LICENSE and NOTICE.txt. Plotting uses Matplotlib. The challenge supplied the practice datasets. The team repository is [nshoman/prometheus-hackathon-agent](https://github.com/nshoman/prometheus-hackathon-agent), with the implementation branch in [ajfurlong/prometheus-hackathon-agent](https://github.com/ajfurlong/prometheus-hackathon-agent). See [SUBMISSION.md](SUBMISSION.md) for validation and remaining judging requirements.

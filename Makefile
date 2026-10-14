@@ -1,10 +1,7 @@
 COMPOSE := docker compose
 
 SDK_PATH ?= ../prometheus_core/sdk
-DATASET ?= tests/fixtures/hollowmere_almanac.md
-OUTPUT ?= demo-output
-
-.PHONY: dev-setup test lint demo
+.PHONY: dev-setup test lint
 dev-setup:
 	uv sync
 	uv pip install -e "$(SDK_PATH)"
@@ -15,9 +12,6 @@ test:
 lint:
 	uv run ruff check .
 
-demo:
-	uv run python cli.py extract "$(DATASET)" --query population --output "$(OUTPUT)/population"
-	uv run python cli.py plot "$(OUTPUT)/population.json" --x Year --y Thistledown Mossbury Pebblewick --output "$(OUTPUT)/population.png"
 UNAME   := $(shell uname)
 
 COMPOSE_BASE := docker-compose.yml

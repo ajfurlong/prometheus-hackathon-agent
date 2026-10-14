@@ -1,6 +1,7 @@
 import pytest
 
-from tables import Table, numeric, parse_csv, parse_markdown, split_cells
+from markdown_parser import parse_markdown, split_cells
+from table_data import TableData, numeric, parse_csv
 
 
 def test_almanac_tables_preserve_exact_values():
@@ -83,4 +84,4 @@ def test_malformed_markdown_rows_are_not_silently_truncated():
 
 def test_invalid_inline_table_payload():
     with pytest.raises(ValueError):
-        Table.from_dict({"columns": ["x"], "rows": [[{"unexpected": 1}]]})
+        TableData.from_dict({"columns": ["x"], "rows": [[{"unexpected": 1}]]})

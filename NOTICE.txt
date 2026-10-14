@@ -1,3 +1,10 @@
+Team 1 contributors represent:
+- Oak Ridge National Laboratory (ORNL)
+- Idaho National Laboratory (INL)
+- Sandia National Laboratories
+
+The upstream Prometheus notice and attribution are retained below.
+
 This project contains code from Idaho National Laboratory.
 Github URL: https://github.com/idaholab/prometheus_core
 Licensed under MIT

@@ -1,11 +1,11 @@
 import pytest
 
 from plotting import render_plot
-from tables import Table
+from table_data import TableData
 
 
 def test_png_and_missing_value_gaps(tmp_path):
-    table = Table(
+    table = TableData(
         "Population", ["Year", "Residents"], [["2021", "1,200"], ["2022", "—"], ["2023", "1400"]]
     )
     path = tmp_path / "plot.png"
@@ -16,7 +16,7 @@ def test_png_and_missing_value_gaps(tmp_path):
 
 
 def test_categorical_data_and_mixed_units(tmp_path):
-    table = Table(
+    table = TableData(
         "Measurements", ["Name", "Mass (kg)", "Speed (m/s)"], [["A", "1", "2"], ["B", "2", "3"]]
     )
     assert (
@@ -28,7 +28,7 @@ def test_categorical_data_and_mixed_units(tmp_path):
 
 
 def test_numeric_comparison_is_scatter(tmp_path):
-    table = Table("Dragons", ["Age (years)", "Wingspan (m)"], [["6", "3.2"], ["87", "10.7"]])
+    table = TableData("Dragons", ["Age (years)", "Wingspan (m)"], [["6", "3.2"], ["87", "10.7"]])
     assert (
         render_plot(table, "Wingspan (m)", ["Age (years)"], tmp_path / "scatter.png")["chart_type"]
         == "scatter"
@@ -50,7 +50,7 @@ def test_caption_does_not_invent_population_units(tmp_path, monkeypatch):
         return savefig(figure, *args, **kwargs)
 
     monkeypatch.setattr(Figure, "savefig", capture_labels)
-    table = Table(
+    table = TableData(
         "Bacterial population growth rates",
         ["Day", "Culture A", "Culture B"],
         [["1", "5%", "10%"], ["2", "7%", "12%"]],
@@ -63,6 +63,6 @@ def test_caption_does_not_invent_population_units(tmp_path, monkeypatch):
 
 @pytest.mark.parametrize("ys", [["Snack"], ["Year"], ["unknown"]])
 def test_nonnumeric_or_invalid_series_are_rejected(tmp_path, ys):
-    table = Table("Data", ["Year", "Population", "Snack"], [["2020", "10", "cake"]])
+    table = TableData("Data", ["Year", "Population", "Snack"], [["2020", "10", "cake"]])
     with pytest.raises(ValueError):
         render_plot(table, "Year", ys, tmp_path / "plot.png")

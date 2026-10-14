@@ -7,7 +7,8 @@ from pathlib import Path
 
 from system.a2a_client import A2AClient
 
-from tables import parse_csv, parse_markdown
+from markdown_parser import parse_markdown
+from table_data import parse_csv
 
 
 async def main():

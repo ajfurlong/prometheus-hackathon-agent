@@ -1,4 +1,4 @@
-"""Deterministic, lossless readers for captioned GFM tables and CSV/TSV files."""
+"""Validated rectangular table data, CSV serialization and numeric conversion."""
 
 from __future__ import annotations
 
@@ -11,17 +11,19 @@ from dataclasses import dataclass
 MISSING = {"", "-", "–", "—", "na", "n/a", "nan", "null", "none", "...", "…"}
 NUMBER = re.compile(r"^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$")
 GROUPED = re.compile(r"^[+-]?\d{1,3}(?:,\d{3})+(?:\.\d*)?(?:[eE][+-]?\d+)?$")
-SEPARATOR = re.compile(r"^:?-{3,}:?$")
 
 
 @dataclass
-class Table:
+class TableData:
+    """Lossless string cells with a caption, unique headers and rectangular rows."""
+
     caption: str
     columns: list[str]
     rows: list[list[str]]
     source_line: int = 0
 
     def __post_init__(self) -> None:
+        """Reject ambiguous headers and inconsistent row widths."""
         if not self.columns or any(not column.strip() for column in self.columns):
             raise ValueError("Table headers must be nonempty.")
         if len(set(self.columns)) != len(self.columns):
@@ -34,6 +36,7 @@ class Table:
                 )
 
     def to_dict(self) -> dict:
+        """Return the serializable table contract used by artifact metadata and tests."""
         return {
             "caption": self.caption,
             "columns": self.columns,
@@ -42,7 +45,8 @@ class Table:
         }
 
     @classmethod
-    def from_dict(cls, payload: dict) -> Table:
+    def from_dict(cls, payload: dict) -> TableData:
+        """Validate a table JSON object and preserve scalar cells as strings."""
         columns, rows = payload.get("columns"), payload.get("rows")
         if not isinstance(columns, list) or not all(isinstance(c, str) for c in columns):
             raise ValueError("A table must have a list of column names.")
@@ -57,6 +61,7 @@ class Table:
         )
 
     def to_csv(self) -> str:
+        """Serialize exact cell values with standard CSV quoting and LF endings."""
         output = io.StringIO(newline="")
         writer = csv.writer(output, lineterminator="\n")
         writer.writerow(self.columns)
@@ -64,6 +69,7 @@ class Table:
         return output.getvalue()
 
     def numeric_columns(self) -> list[str]:
+        """List columns containing numbers or missing markers, with at least one number."""
         result = []
         for index, column in enumerate(self.columns):
             cells = [row[index] for row in self.rows]
@@ -73,8 +79,24 @@ class Table:
                 result.append(column)
         return result
 
+    def plot_rows(self, x: str, ys: list[str]) -> tuple[list, list, bool]:
+        """Validate columns, omit missing x cells and sort numeric x without changing source rows."""
+        if x not in self.columns or not ys:
+            raise ValueError("Choose an existing x column and at least one y column.")
+        if any(y not in self.numeric_columns() or y == x for y in ys):
+            raise ValueError("Y columns must contain numbers and must differ from the x column.")
+        xi = self.columns.index(x)
+        rows = [row for row in self.rows if not is_missing(row[xi])]
+        if not rows:
+            raise ValueError("The x column has no usable values.")
+        numeric_x = all(numeric(row[xi]) is not None for row in rows)
+        if numeric_x:
+            rows = sorted(rows, key=lambda row: numeric(row[xi]))
+        return rows, [numeric(row[xi]) if numeric_x else row[xi] for row in rows], numeric_x
+
 
 def is_missing(value: str) -> bool:
+    """Recognize documented empty or missing-value markers without changing cells."""
     return str(value).strip().casefold() in MISSING
 
 
@@ -98,79 +120,8 @@ def numeric(value: str) -> float | None:
     return value if math.isfinite(value) else None
 
 
-def split_cells(line: str) -> list[str]:
-    """Split GFM pipes, respecting escaped pipes and escaped backslashes."""
-    line = line.strip()
-    cells, cell = [], []
-    index = 0
-    while index < len(line):
-        char = line[index]
-        if char == "\\" and index + 1 < len(line) and line[index + 1] in "|\\":
-            cell.append(line[index + 1])
-            index += 2
-            continue
-        if char == "|":
-            cells.append("".join(cell).strip())
-            cell = []
-        else:
-            cell.append(char)
-        index += 1
-    cells.append("".join(cell).strip())
-    if line.startswith("|"):
-        cells.pop(0)
-    # An escaped final pipe is part of the last cell, not a table border.
-    if line.endswith("|") and cells[-1] == "":
-        cells.pop()
-    return cells
-
-
-def parse_markdown(text: str) -> list[Table]:
-    lines = text.lstrip("\ufeff").splitlines()
-    tables = []
-    fence = None
-    index = 0
-    while index < len(lines) - 1:
-        line = lines[index]
-        marker = re.match(r"^\s*(`{3,}|~{3,})", line)
-        if marker:
-            run = marker.group(1)
-            if fence is None:
-                fence = (run[0], len(run))
-            elif run[0] == fence[0] and len(run) >= fence[1] and not line[marker.end() :].strip():
-                fence = None
-            index += 1
-            continue
-        if fence or "|" not in line:
-            index += 1
-            continue
-        headers = split_cells(line)
-        separators = split_cells(lines[index + 1])
-        if len(headers) != len(separators) or not all(
-            SEPARATOR.fullmatch(cell.replace(" ", "")) for cell in separators
-        ):
-            index += 1
-            continue
-        # Captions can wrap across lines; only the immediately preceding paragraph counts.
-        end = index - 1
-        while end >= 0 and not lines[end].strip():
-            end -= 1
-        start = end
-        while start >= 0 and lines[start].strip():
-            start -= 1
-        paragraph = " ".join(lines[start + 1 : end + 1])
-        caption = re.search(r"\*\*(.*?)\*\*", paragraph)
-        title = caption.group(1).strip() if caption else f"Table {len(tables) + 1}"
-        source_line = index + 1
-        index += 2
-        rows = []
-        while index < len(lines) and lines[index].strip() and "|" in lines[index]:
-            rows.append(split_cells(lines[index]))
-            index += 1
-        tables.append(Table(title, headers, rows, source_line))
-    return tables
-
-
-def parse_csv(text: str, caption: str = "CSV data", delimiter: str | None = None) -> Table:
+def parse_csv(text: str, caption: str = "CSV data", delimiter: str | None = None) -> TableData:
+    """Read UTF-8 CSV/TSV text, sniffing comma, semicolon or tab delimiters."""
     text = text.lstrip("\ufeff")
     if delimiter is None:
         try:
@@ -184,4 +135,4 @@ def parse_csv(text: str, caption: str = "CSV data", delimiter: str | None = None
     rows = [row for row in rows if any(cell.strip() for cell in row)]
     if not rows:
         raise ValueError("The CSV file is empty.")
-    return Table(caption, [cell.strip() for cell in rows[0]], rows[1:])
+    return TableData(caption, [cell.strip() for cell in rows[0]], rows[1:])

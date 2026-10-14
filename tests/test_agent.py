@@ -8,7 +8,7 @@ from agent import TablePlotAgent
 
 
 @pytest.fixture
-def agent():
+def agent(monkeypatch):
     instance = object.__new__(TablePlotAgent)
     state = {}
     instance.load_context_state = lambda _: state
@@ -16,6 +16,7 @@ def agent():
     instance.get_provided_inputs = lambda _: {}
     instance.send_status_update = AsyncMock()
     instance.send_input_required = AsyncMock()
+    instance.send_json_artifact = AsyncMock(return_value="table-list-artifact")
     instance.get_artifact_file_path = AsyncMock()
     instance.resolve_artifact_reference = lambda *_: None
     instance.llm_client = MagicMock()
@@ -25,11 +26,15 @@ def agent():
     instance.llm_client.return_value.__aexit__ = AsyncMock(return_value=False)
     instance._published = []
 
-    async def publish(path, caption, mime_type, context, events, metadata):
-        instance._published.append((mime_type, path.read_bytes(), metadata))
+    from artifact_io import ConnectionConfig
+
+    monkeypatch.setattr(ConnectionConfig, "from_env", lambda: object())
+
+    async def publish(*, file_path, mime_type, metadata, **kwargs):
+        instance._published.append((mime_type, file_path.read_bytes(), metadata))
         return SimpleNamespace(artifact_id="output-artifact")
 
-    instance._publish = publish
+    instance.send_deeplynx_artifact = publish
     return instance
 
 
@@ -118,6 +123,21 @@ async def test_unknown_skill_is_rejected(agent, context, event_queue):
     assert (await agent._execute({"skill_id": "unknown"}, context, event_queue))[
         "status"
     ] == "error"
+
+
+async def test_list_skill_uses_the_parser_without_inference(agent, context, event_queue):
+    agent.get_artifact_file_path.return_value = (
+        Path(__file__).parent / "fixtures/hollowmere_almanac.md"
+    )
+    result = await agent._execute(
+        {"skill_id": "team1_list_tables", "document_artifact_id": "doc"},
+        context,
+        event_queue,
+    )
+    assert result["artifact_id"] == "table-list-artifact"
+    assert [table["rows"] for table in result["tables"]] == [15, 12, 8]
+    assert result["tables"][0]["columns"][-1] == "Total"
+    agent.llm_client.assert_not_called()
 
 
 async def test_workflow_plot_request_can_select_symbolic_axes(
