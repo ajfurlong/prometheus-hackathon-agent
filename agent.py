@@ -1,159 +1,311 @@
-# This file is part of Prometheus
-# https://inl.gov/super-intelligence/prometheus/
-#
-# Copyright 2026 Battelle Energy Alliance, LLC
-# All rights reserved, see NOTICE.txt for full restrictions
-# https://github.com/idaholab/prometheus_core/blob/main/NOTICE.txt
-#
-# Licensed under the MIT License, please see LICENSE for details
-# https://github.com/idaholab/prometheus_core/blob/main/LICENSE
-#
-# SPDX-License-Identifier: MIT
+"""Team 1's generic Table & Plot agent, built from the Prometheus agent template."""
 
-"""
-Markdown table extractor Agent.
+from __future__ import annotations
 
-A specialized agent for markdown table extractor
-
-This is a Prometheus specialist agent.  Subclass PrometheusAgent and implement
-`_execute` — the base class handles the HTTP server, authentication, agent-card
-serving, and registry registration for you.
-"""
-
+import asyncio
+import json
 import logging
+import tempfile
+from pathlib import Path
 from typing import Any
 
-from prometheus_api import load_prompt  # noqa: F401 - used by the LLM pattern below
-from prometheus_api.agent import EventQueue, PrometheusAgent, RequestContext
+from prometheus_api.agent import EventQueue, MissingInput, PrometheusAgent, RequestContext
+from prometheus_api.storage_client import ConnectionConfig
 
-# Read secrets and configuration from environment variables.
-# Never hard-code API keys or URLs here.
-# Example (add `import os` to the imports above):
-#   MY_API_KEY = os.getenv("MY_API_KEY")
+from matching import is_vague, match_column, match_table, select_axes, select_table
+from plotting import render_plot
+from tables import Table, parse_csv, parse_markdown
 
-logging.basicConfig(
-    level=logging.INFO,
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
-)
 logger = logging.getLogger(__name__)
 
 
-class MarkdownTableExtractorAgent(PrometheusAgent):
-    """Markdown table extractor Agent."""
-
-    # Optional: register agent-owned HTTP endpoints in __init__.
-    #
-    # def __init__(self, *args: Any, **kwargs: Any) -> None:
-    #     super().__init__(*args, **kwargs)
-    #     self.add_http_endpoint(
-    #         "/api/preview/{artifact_id}",
-    #         self.preview_artifact,
-    #         methods=["GET"],
-    #         endpoint_id="artifact_preview",
-    #         purpose="artifact",
-    #         description="Return preview metadata for one artifact.",
-    #         content_types=["application/json"],
-    #     )
-    #     self.add_static_endpoint(
-    #         "/viewer",
-    #         "viewer-assets",
-    #         endpoint_id="viewer_assets",
-    #         purpose="viewer_plugin",
-    #         description="Serve viewer plugin JavaScript and CSS.",
-    #         content_types=["text/javascript", "text/css"],
-    #     )
-    #
-    # async def preview_artifact(self, request):
-    #     from starlette.responses import JSONResponse
-    #
-    #     return JSONResponse({"artifact_id": request.path_params["artifact_id"]})
+class TablePlotAgent(PrometheusAgent):
+    """Parse values deterministically; ask rather than guess ambiguous selections."""
 
     async def _execute(
+        self, params: dict[str, Any], context: RequestContext, event_queue: EventQueue
+    ) -> dict:
+        skill = params.get("skill_id")
+        handlers = {
+            "team1_extract_table": self._extract,
+            "team1_plot_table": self._plot,
+            "team1_list_tables": self._list,
+        }
+        handler = handlers.get(skill)
+        if handler is None:
+            return {"status": "error", "message": "Unknown table/plot skill."}
+        pending = self.load_context_state(str(context.context_id)).get("pending", {})
+        merged = dict(pending) if pending.get("skill_id") == skill else {}
+        merged.update(params)
+        merged.update(self.get_provided_inputs(context))
+        try:
+            return await handler(merged, context, event_queue)
+        except (ValueError, FileNotFoundError, UnicodeError) as exc:
+            return {"status": "error", "message": str(exc)}
+
+    async def _ask(
         self,
-        params: dict[str, Any],
+        params: dict,
         context: RequestContext,
-        event_queue: EventQueue,
-    ) -> dict[str, Any]:
-        """Process one request.
+        events: EventQueue,
+        fields: list[MissingInput],
+        hint: str,
+    ) -> dict:
+        # Persist only selectors; reload source artifacts after the follow-up.
+        pending = {
+            key: value for key, value in params.items() if key not in {"artifacts", "userToken"}
+        }
+        self.save_context_state(str(context.context_id), {"pending": pending})
+        await self.send_input_required(context, events, missing_inputs=fields, hint=hint)
+        return {}
 
-        Args:
-            params: Parameters from the caller's JSON payload, plus ``skill_id``
-                from the message metadata (the skill the orchestrator selected).
-            context: The A2A request context.  Use ``context.context_id`` as a
-                stable key for per-conversation state.
-            event_queue: Pass to the ``send_*`` helpers to emit progress updates
-                and artifacts.
+    async def _text(
+        self, artifact_id: str, params: dict, context: RequestContext
+    ) -> tuple[str, str]:
+        if not artifact_id:
+            raise ValueError("Upload a file in this conversation and choose its artifact.")
+        path = await self.get_artifact_file_path(
+            artifact_id, context=context, artifacts=params.get("artifacts")
+        )
+        if path.stat().st_size > 8_000_000:
+            raise ValueError("Please provide a document smaller than 8 MB.")
+        reference = self.resolve_artifact_reference(str(context.context_id), artifact_id)
+        name = reference.name if reference else path.name
+        return await asyncio.to_thread(path.read_text, encoding="utf-8-sig"), name
 
-        Returns:
-            A plain ``dict``.  The base class wraps it as the final ``completed``
-            task status automatically — do not enqueue that event yourself.
-        """
-        # ------------------------------------------------------------------
-        # 1. Read inputs from params.  These keys must match the properties
-        #    declared in agent_card.json's inputSchema.
-        # ------------------------------------------------------------------
-        input_data = params.get("input_data")
-        if not input_data:
-            return {"status": "error", "error": "input_data is required"}
+    async def _markdown(self, params: dict, context: RequestContext) -> list[Table]:
+        text, name = await self._text(
+            str(params.get("document_artifact_id") or ""), params, context
+        )
+        if Path(name).suffix.lower() not in {".md", ".markdown"}:
+            raise ValueError(
+                "Extract/list tables expects a Markdown (.md) upload; use the plot skill for CSV."
+            )
+        tables = parse_markdown(text)
+        if not tables:
+            raise ValueError("No GitHub-flavoured Markdown tables were found in this document.")
+        return tables
 
-        # ------------------------------------------------------------------
-        # 2. Send optional progress updates so the UI stays responsive.
-        #    The base class sends the initial "working" update automatically;
-        #    call this only when you want intermediate messages.
-        # ------------------------------------------------------------------
+    async def _list(self, params: dict, context: RequestContext, events: EventQueue) -> dict:
+        tables = await self._markdown(params, context)
+        listing = [
+            {
+                "caption": table.caption,
+                "columns": table.columns,
+                "rows": len(table.rows),
+                "source_line": table.source_line,
+            }
+            for table in tables
+        ]
+        artifact_id = await self.send_json_artifact(
+            context, events, listing, name="available_tables", catalog_artifact=True
+        )
+        return {"status": "success", "tables": listing, "artifact_id": artifact_id}
+
+    async def _extract(self, params: dict, context: RequestContext, events: EventQueue) -> dict:
+        tables = await self._markdown(params, context)
         await self.send_status_update(
             context=context,
-            event_queue=event_queue,
-            message="Processing your request…",
+            event_queue=events,
+            message=f"Found {len(tables)} tables; matching captions.",
         )
-
-        # ------------------------------------------------------------------
-        # 3. Do your actual work here.  Replace this with real logic.
-        # ------------------------------------------------------------------
-        result = {
+        choices = [f"{index + 1}: {table.caption}" for index, table in enumerate(tables)]
+        chosen = params.get("table_choice")
+        query = str(params.get("table_query") or "")
+        index = choices.index(chosen) if chosen in choices else match_table(tables, query)
+        if index is None and query.strip():
+            async with self.llm_client(context) as llm:
+                index = await select_table(llm, tables, query)
+        if index is None:
+            return await self._ask(
+                params,
+                context,
+                events,
+                [
+                    MissingInput(
+                        name="table_choice",
+                        type="enum",
+                        options=choices,
+                        description="The captions actually present in your document.",
+                        user_prompt="Which table should I extract?",
+                    )
+                ],
+                "I could not select a unique matching table. Choose an actual caption.",
+            )
+        table = tables[index]
+        await self.send_status_update(
+            context=context,
+            event_queue=events,
+            message=f"Extracting {len(table.rows)} rows and {len(table.columns)} columns without an LLM parser.",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / f"table_{index + 1}.csv"
+            path.write_text(table.to_csv(), encoding="utf-8")
+            reference = await self._publish(
+                path,
+                table.caption,
+                "text/csv",
+                context,
+                events,
+                {
+                    "caption": table.caption,
+                    "columns": table.columns,
+                    "source_line": table.source_line,
+                },
+            )
+        self.save_context_state(str(context.context_id), {})
+        return {
             "status": "success",
-            "input_received": input_data,
-            "message": "Replace this with your agent's processing logic.",
+            "artifact_id": reference.artifact_id,
+            "table_artifact_id": reference.artifact_id,
+            "caption": table.caption,
+            "columns": table.columns,
+            "numeric_columns": table.numeric_columns(),
+            "row_count": len(table.rows),
         }
 
-        # ------------------------------------------------------------------
-        # 4. Return a plain dict.  Keep keys consistent with the
-        #    "output_format" you described in agent_card.json.
-        # ------------------------------------------------------------------
-        return result
+    async def _load_table(self, params: dict, context: RequestContext) -> Table:
+        artifact_id = str(params.get("table_artifact_id") or "")
+        reference = self.resolve_artifact_reference(str(context.context_id), artifact_id)
+        if reference and isinstance(reference.json_body, dict):
+            return Table.from_dict(reference.json_body)
+        text, name = await self._text(artifact_id, params, context)
+        reference = self.resolve_artifact_reference(str(context.context_id), artifact_id)
+        suffix = Path(name).suffix.lower()
+        if suffix == ".json":
+            return Table.from_dict(json.loads(text))
+        if suffix not in {".csv", ".tsv"}:
+            raise ValueError(
+                "Plotting expects a CSV/TSV upload or an extracted table artifact. Extract Markdown first."
+            )
+        caption = (
+            reference.metadata.get("caption") or reference.description
+            if reference
+            else Path(name).stem
+        )
+        return parse_csv(
+            text, str(caption or Path(name).stem), delimiter="\t" if suffix == ".tsv" else None
+        )
 
-    # ----------------------------------------------------------------------
-    # PATTERNS — uncomment and adapt as needed.
-    # ----------------------------------------------------------------------
-    #
-    # Calling an LLM through the platform's LiteLLM gateway:
-    #
-    #     system_prompt = load_prompt("system_prompt.txt").format(input_data=input_data)
-    #     async with self.llm_client(context) as llm:
-    #         response = await llm.medium(system_prompt)
-    #     return {"status": "success", "summary": response.text}
-    #
-    # Dispatching when agent_card.json declares more than one skill:
-    #
-    #     handler = {
-    #         "skill_a": self._handle_a,
-    #         "skill_b": self._handle_b,
-    #     }.get(params.get("skill_id"))
-    #     if handler is None:
-    #         return {"status": "error", "error": f"Unknown skill: {params.get('skill_id')}"}
-    #     return await handler(params, context, event_queue)
-    #
-    # Persisting per-conversation state across turns (Redis-backed, with an
-    # in-memory fallback for local development):
-    #
-    #     state = self.load_context_state(str(context.context_id))
-    #     state["count"] = state.get("count", 0) + 1
-    #     self.save_context_state(str(context.context_id), state)
-    #
-    # See TUTORIAL.md ("Advanced topics") for emitting artifacts, asking the
-    # user for missing inputs (INPUT_REQUIRED), and DeepLynx file storage.
+    async def _plot(self, params: dict, context: RequestContext, events: EventQueue) -> dict:
+        table = await self._load_table(params, context)
+        numeric_columns = table.numeric_columns()
+        if not numeric_columns:
+            raise ValueError("This table has no numeric columns to plot.")
+        x_request = str(params.get("x_column") or "")
+        y_requests = params.get("y_columns") or (
+            [params["y_column"]] if params.get("y_column") else []
+        )
+        if isinstance(y_requests, str):
+            y_requests = [y_requests]
+        x = match_column(table.columns, x_request) if x_request else None
+        ys = [match_column(table.columns, str(y)) for y in y_requests]
+        ys = (
+            list(dict.fromkeys(ys))
+            if ys and all(y in numeric_columns and y != x for y in ys)
+            else []
+        )
+        query = str(params.get("plot_query") or "")
+        if (not x or not ys) and not is_vague(query):
+            async with self.llm_client(context) as llm:
+                selected = await select_axes(llm, table, query)
+            if selected:
+                x = x or selected[0]
+                ys = ys or [y for y in selected[1] if y != x]
+        fields = []
+        if not x:
+            fields.append(
+                MissingInput(
+                    name="x_column",
+                    type="enum",
+                    options=table.columns,
+                    description="Actual columns in the selected table.",
+                    user_prompt="Which column goes on the x axis?",
+                )
+            )
+        if not ys:
+            candidates = [column for column in numeric_columns if column != x]
+            if not candidates:
+                raise ValueError(
+                    "There is no numeric y column distinct from the selected x column."
+                )
+            fields.append(
+                MissingInput(
+                    name="y_column",
+                    type="enum",
+                    options=candidates,
+                    description="Numeric columns available for the y axis.",
+                    user_prompt="Which column should I plot on the y axis?",
+                )
+            )
+        if fields:
+            return await self._ask(
+                params,
+                context,
+                events,
+                fields,
+                "Choose the columns to plot; I will not guess unspecified axes.",
+            )
+        await self.send_status_update(
+            context=context, event_queue=events, message=f"Plotting {', '.join(ys)} versus {x}."
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "plot.png"
+            details = await asyncio.to_thread(
+                render_plot,
+                table,
+                x,
+                ys,
+                path,
+                str(params.get("chart_type") or "auto"),
+                params.get("title"),
+            )
+            reference = await self._publish(
+                path,
+                f"{', '.join(ys)} versus {x}. {table.caption}",
+                "image/png",
+                context,
+                events,
+                {"x_column": x, "y_columns": ys, **details},
+            )
+        self.save_context_state(str(context.context_id), {})
+        return {
+            "status": "success",
+            "artifact_id": reference.artifact_id,
+            "x_column": x,
+            "y_columns": ys,
+            "caption": table.caption,
+            **details,
+        }
+
+    async def _publish(
+        self,
+        path: Path,
+        caption: str,
+        mime_type: str,
+        context: RequestContext,
+        events: EventQueue,
+        metadata: dict,
+    ):
+        try:
+            config = ConnectionConfig.from_env()
+        except ValueError:
+            raise ValueError(
+                "Configure the agent's local DEEPLYNX_* variables before publishing artifacts."
+            ) from None
+        return await self.send_deeplynx_artifact(
+            context=context,
+            event_queue=events,
+            file_path=path,
+            name=path.name,
+            description=caption,
+            storage_config=config,
+            mime_type=mime_type,
+            tags=["team1", "table" if mime_type == "text/csv" else "plot"],
+            metadata=metadata,
+        )
 
 
 if __name__ == "__main__":
-    agent = MarkdownTableExtractorAgent(agent_name="Markdown table extractor Agent")
-    agent.run()
+    logging.basicConfig(level=logging.INFO)
+    TablePlotAgent(agent_name="Team 1 Table and Plot Agent").run()

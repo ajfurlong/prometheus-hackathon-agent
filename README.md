@@ -1,181 +1,83 @@
-# Markdown table extractor Agent
+# Team 1 Table and Plot Agent
 
-A specialized agent for markdown table extractor
+A general-purpose table extraction and plotting agent for Team 1, built with `prometheus_core/agent-template/setup_agent.py` and subclassing `PrometheusAgent`. It accepts rectangular tables from different domains: UTF-8 GitHub-flavoured Markdown with captions, CSV/TSV, or compatible table JSON. The supplied Hollowmere file is a demo and test fixture; the parser has no dataset-specific rules.
 
-A Prometheus specialist agent that speaks the Agent-to-Agent (A2A) protocol. The
-platform's orchestrator discovers it, routes user requests to it, and renders its
-responses in the Prometheus web UI.
+## Skills
 
-## Files
+| Skill ID | Input | Output |
+|---|---|---|
+| `team1_extract_table` | Markdown artifact ID and a caption/subject description | A CSV table artifact, exact headers/values, caption and row count |
+| `team1_plot_table` | Extracted table artifact or uploaded CSV/TSV; requested axes | A PNG artifact stored in DeepLynx |
+| `team1_list_tables` | Markdown artifact ID | Actual captions, columns, row counts and source lines |
 
-| File | Purpose |
-|------|---------|
-| `agent.py` | Your code. Subclass of `PrometheusAgent`; implements `_execute`. |
-| `agent_card.json` | Declares the agent's name, description, and skills. The orchestrator reads this to decide when to route to you. |
-| `prompts/` | Prompt template files loaded by your agent code when prompts get too large for `agent.py`. |
-| `workflows/` | Optional agent-owned workflow definitions inserted into the served agent card. |
-| `pyproject.toml` | Extra Python dependencies your code imports directly. |
-| `Dockerfile` | Builds the image from the pinned `prometheus_api` base image. |
-| `docker-compose.yml` | Common service definition for containerized runs. |
-| `docker-compose.net_internal.yml` | Default network include for joining the platform Docker network. |
-| `docker-compose.net_external.yml` | Network include for exposing the agent port outside Docker. |
-| `Makefile` | Convenience wrapper around `docker compose` (`make up`, `make up-fg`, `make down`, `make logs`). |
-| `.env.example` | Template for `.env` — copy and fill in real values. |
+The card is **Team 1 Table and Plot Agent**; the Docker container is `team1-table-plot-agent`. The agent joins the existing `prometheus_platform_agent-network` and registers itself. No platform source changes are required.
 
-`prometheus_api`, `a2a`, `starlette`, and `uvicorn` are already installed in the
-base image — do **not** add them to `pyproject.toml`.
+## Approach
 
-## Run locally (fast iteration)
+`tables.py` deterministically scans GitHub-flavoured Markdown tables. It associates the immediately preceding bold caption, including multiline captions and captions followed by prose. It ignores fenced code, recognizes alignment separators, handles escaped pipes, validates row widths and unique headers, and retains original cell strings. CSV/TSV use Python's standard `csv` parser, including quoted commas and quotes.
 
-```bash
-cp .env.example .env          # then fill in real values
+`matching.py` first matches exact headers, caption words and common semantic synonyms. It distinguishes `t` from `T` and understands units such as `[min]` and `[K]`. When the user's description remains ambiguous, one forced LLM tool call may choose among actual captions/headers; row values are never sent to the model. Invalid names or indices are rejected. If the model is unavailable or cannot match, the agent asks rather than fabricating data.
 
-uv sync                       # creates .venv with your deps + dev tools (pytest, ruff)
-source .venv/bin/activate
+`plotting.py` uses Matplotlib's Agg backend and isolated figures. It supports line, scatter and grouped-bar plots, original axis labels/units, legends for multiple series, and separate panels for incompatible y units. Units come from the column headers; caption words do not imply units. Thousands separators and Unicode minus signs are recognized only for plotting. Missing values remain intact in CSV output and become gaps in lines; no interpolation or imputation occurs. Numeric x values are sorted for plotting, without altering extracted rows. Rendering runs in a worker thread.
 
-# Install prometheus_api pinned to the platform's base image hash
-# (PROMETHEUS_API_BASE_IMAGE_HASH in your .env) so local dev matches the
-# container. Re-run this when the platform bumps the hash.
-uv pip install "git+https://github.inl.gov/genesis/prometheus_platform.git@$(grep -E '^PROMETHEUS_API_BASE_IMAGE_HASH=' .env | cut -d= -f2)#subdirectory=sdk"
+For **plot this**, axes stay optional in the card so the skill can read the file and offer dropdowns of its real columns. The follow-up stores selectors in conversation state and reloads the source on resume. `y_columns` supports multiple explicitly requested series; the dropdown chooses one series.
 
-AGENT_SECRET_REQUIRED=false python agent.py
+CSV output uses `text/csv`, which the current platform renders as a table. PNG output uses `image/png`, which renders as an image. Both are cataloged DeepLynx artifacts and pass between skills by artifact ID, never by copying table contents into prompts. A published workflow, `team1.extract_then_plot`, also chains the two skills.
+
+## Setup and run
+
+From this repository's root, with `prometheus_core` checked out alongside it:
+
+```sh
+make dev-setup
+uv run pytest
+uv run ruff check .
+make up
 ```
 
-If the target agent is running in Docker, start it in external network mode so
-`localhost:8000` reaches the container; see the
-[template README run instructions](https://github.inl.gov/genesis/prometheus_platform/blob/dev/agent-template/README.md#run-it).
+`make dev-setup` installs the agent dependencies and the local SDK in its isolated environment. If the SDK is elsewhere, supply its path: `make dev-setup SDK_PATH=/path/to/prometheus_core/sdk`. The SDK must match the platform image; it is intentionally not a runtime dependency because the template's base image already provides it. Python 3.12+ and uv are required for local development.
 
-The agent starts on `http://localhost:8000`. Test it:
+For Docker, `.env` selects the SDK base image, inference profile and shared platform credentials. This workspace's ignored `.env` was copied from the existing platform setup and uses the local SDK and Azure profile. Never commit this file. A fresh checkout can copy `.env.example` to `.env`, then use the template's `setup_agent.py --env-only /path/to/agent` or configure the variables below directly.
 
-```bash
-curl -s -X POST http://localhost:8000 \
-  -H "Content-Type: application/json" \
-  -H "Authorization: Bearer $AGENT_SECRET" \
-  -d '{
-    "jsonrpc": "2.0",
-    "method": "message/send",
-    "id": "1",
-    "params": {
-      "message": {
-        "messageId": "msg-1",
-        "role": "user",
-        "parts": [{"kind": "text", "text": "{\"input_data\": \"hello\"}"}],
-        "metadata": {"skillId": "markdown_table_extractor_analysis"}
-      }
-    }
-  }' | python -m json.tool
+Required settings:
+
+- `PROMETHEUS_API_BASE_IMAGE_REPO` and `PROMETHEUS_API_BASE_IMAGE_HASH`: an SDK image compatible with the platform; this workspace uses `prometheus_api:local`.
+- `AGENT_SECRET`, `LITELLM_MASTER_KEY`, `REDIS_PASSWORD`: match the running platform.
+- `REGISTRY_URL`, `REDIS_URL`: the existing platform network addresses.
+- `DEEPLYNX_BASE_URL`, `DEEPLYNX_KEY`, `DEEPLYNX_SECRET`, `DEEPLYNX_ORG_ID`, `DEEPLYNX_PROJECT_ID`: the same storage configuration as the platform.
+- `LLM_CONFIG_PROFILE` and its provider key: this demo uses `azure` and `OPENAI_API_KEY`. Deterministic local parsing/plotting needs no LLM key.
+- `JWKS_URL` or the platform's public identity key, issuer/audience and `USER_IDENTITY_REQUIRED`: match the platform's identity configuration. Never copy its private signing key.
+
+The template Makefile supports internal mode (default) or external mode with both `EXTERNAL_AGENT_HOST` and `EXTERNAL_AGENT_PORT`. `make down` stops only this agent. After adding/changing its card or workflow, refresh orchestrator discovery or wait for automatic refresh. `/agents` should show the Team 1 card.
+
+If the same agent is already running from another checkout, stop that copy with `make down` in its directory before starting this one. Both use the container name `team1-table-plot-agent`.
+
+## Demo in chat
+
+The demo uploads are included under `tests/fixtures/`. Use a fresh conversation for each test:
+
+1. Upload `hollowmere_almanac.md`. Ask: **Extract the table with population data and plot the population of each village over time.** Expect a 15-row table and a line plot of Thistledown, Mossbury and Pebblewick from 2010 to 2024, excluding the aggregate Total column.
+2. Upload `demo_sightings.csv`. Ask: **Plot this file.** Choose `night` for x and `mice_sighted` for y in the actual-column dropdowns.
+3. Upload `symbolic_report.md`. Ask: **Extract the heating measurements table and plot temperature against time.** Expect `t [min]` vs `T [K]`, with a gap for the missing reading.
+4. Ask to list tables, or request a nonexistent table. Expect real caption choices or a clear message.
+
+Offline, run `make demo` to write the population CSV, structured JSON and PNG under the ignored `demo-output/` directory. The same parser/plotter also have generic commands:
+
+```sh
+uv run python cli.py list tests/fixtures/hollowmere_almanac.md
+uv run python cli.py extract report.md --query population --output output/population
+uv run python cli.py plot output/population.json --x Year --y Village_A Village_B --output output/population.png
+uv run python cli.py plot measurements.csv --x time --y temperature --output output/temperature.png
 ```
 
-(`skillId` lives in `message.metadata` — that is where the base class reads it.)
+`live_verify.py` exercises uploaded files through the normal platform orchestrator using its existing system-test A2A helper. It does not call the Team 1 skills directly or prescribe an execution plan. It runs in an ephemeral test container with `/tests/system`, `/dataset`, and `/results` mounts. It prints only sanitized progress/results and saves a verification report.
 
-Without Redis, per-conversation state and the artifact registry fall back to an
-in-memory dict — fine for local development.
+## Tests and limits
 
-## Run the tests
+Tests cover the actual almanac, wrapped captions, escaped pipes, fenced examples, CSV quoting/BOM/delimiters, thousands separators, missing data, malformed rows, symbol matching, mocked LLM decisions, PNG generation, honest labels and input-required resume. Files are limited to 8 MB; only UTF-8 Markdown/CSV/TSV or compatible inline table JSON are accepted. Headers must be unique and nonempty, rows must have consistent widths, and y columns must contain numeric or recognized missing values. Excel workbooks, PDFs and scanned tables need a separate reader. Arbitrary text/currency/unit conversion and approximate value extraction are not attempted.
 
-```bash
-uv run pytest                 # tests/ — extend as you implement _execute
-uv run ruff check .           # lint
-```
+The team repository is [nshoman/prometheus-hackathon-agent](https://github.com/nshoman/prometheus-hackathon-agent), with your fork at [ajfurlong/prometheus-hackathon-agent](https://github.com/ajfurlong/prometheus-hackathon-agent). The table-and-plot implementation is maintained on branch `table-plot-agent`; `origin` points to your fork and `upstream` points to the team repository. Validation and the remaining submission requirements are tracked in [SUBMISSION.md](SUBMISSION.md).
 
-## Run with Docker
+## Attribution
 
-Optionally set `PROMETHEUS_API_BASE_IMAGE_HASH` in `.env` (find the current value in
-`platform/Makefile`), or let it default to `latest`, then:
-
-```bash
-make up-fg       # build + start in the foreground (Ctrl-C to stop)
-make up          # build + start detached
-make logs        # tail logs (add SERVICE=<name> for one service)
-make down        # stop and remove
-```
-
-These wrap `docker compose` and, on Linux, layer in `docker-compose.linux.yml`
-only when external mode is selected.
-
-By default, `make` includes `docker-compose.net_internal.yml`, so the agent joins
-the platform's Docker network. Start the platform first, then run `make up` or
-`make up-fg` here. Without a running platform, Docker cannot attach to that network.
-
-To expose the agent port outside Docker instead, set both external mode variables:
-
-```bash
-EXTERNAL_AGENT_HOST=my-host.example.gov EXTERNAL_AGENT_PORT=8042 make up
-```
-
-`host.docker.internal` is Docker's hostname for "the host machine from inside a
-container." Docker Desktop provides it automatically. On Linux, external mode
-also includes `docker-compose.linux.yml`, which maps that name to Docker's host
-gateway so the agent container can call host-published platform services.
-
-If exactly one of `EXTERNAL_AGENT_HOST` or `EXTERNAL_AGENT_PORT` is set, `make`
-stops before running Compose.
-
-For in-tree platform deployment, copy this directory into
-`platform/agents/<name>/` and run `make generate && make up` from the
-`platform/` directory.
-
-## Customizing
-
-1. **`agent_card.json`** — set `name`, `description` (a one-sentence capability
-   statement the orchestrator reads), and the skill's `inputSchema`,
-   `output_format`, and `usage_notes`.
-2. **`agent.py`** — read your inputs from `params`, do the work, return a plain
-   `dict`. Use `self.send_status_update(...)` for progress messages.
-3. **`prompts/`** — move large static LLM prompts into text files and load them
-   with `load_prompt(...)` from `prometheus_api`.
-4. **`workflows/`** — add workflow YAML/JSON files when this agent should publish
-   workflow templates to the platform. Rename `example_workflow.yaml.example` to
-   `.yaml` only after reviewing it; `.yaml` files are auto-published.
-5. **Custom HTTP endpoints** — use `self.add_http_endpoint(...)` for small JSON
-   endpoints or `self.add_static_endpoint(...)` for authenticated static assets
-   such as viewer plugin files. Registered endpoints are advertised in the raw
-   agent card under `endpoints`.
-6. **`pyproject.toml`** — add any packages your code imports.
-
-See **TUTORIAL.md** in the template repository for a full walkthrough, including
-emitting artifacts, asking the user for missing inputs (`INPUT_REQUIRED`),
-multiple skills, agent-owned workflows, custom endpoints, prompt files, and
-DeepLynx file storage.
-
-## Key environment variables
-
-| Variable | Purpose |
-|----------|---------|
-| `AGENT_PORT` | Port the agent listens on (default `8000`). |
-| `EXTERNAL_AGENT_HOST` / `EXTERNAL_AGENT_PORT` | Optional Docker external mode. Leave both unset to join the platform Docker network; set both to expose the agent port and register `http://{host}:{port}`. |
-| `AGENT_SECRET` | Shared bearer token for A2A auth. Must match the platform's. |
-| `AGENT_SECRET_REQUIRED` | Set `false` to disable auth — local development only. |
-| `AGENT_WORKFLOWS` | Optional workflow directory override. Defaults to `workflows` next to `agent_card.json`. |
-| `REGISTRY_URL` | LiteLLM proxy URL where the agent registers on startup. |
-| `LITELLM_MASTER_KEY` | LiteLLM gateway auth. |
-| `REDIS_URL` / `REDIS_PASSWORD` | Conversation state and artifact registry. |
-| `PROMETHEUS_API_BASE_IMAGE_HASH` | Base image tag the Dockerfile builds from. |
-| `JWKS_URL` | Multi-user identity (recommended): the platform operator's JWKS URL — point it at the **platform backend** (`https://<platform-host>/.well-known/jwks.json`), not at another agent. Fetches the verification key automatically, including any rotation done through the platform's admin UI. See below. |
-| `USER_IDENTITY_PUBLIC_KEY` | Multi-user identity (alternative to `JWKS_URL`): a static public key from the platform operator. **Never** the private key — this agent only verifies. Won't observe a key rotated through the admin UI; re-ask the operator for the new key if verification starts failing. |
-| `USER_IDENTITY_ISS` / `USER_IDENTITY_AUD` | Must match the platform operator's values exactly. |
-
-See `.env.example` for the full list (including optional DeepLynx and proxy settings).
-
-### Verifying platform users (multi-user)
-
-If the platform is running in multi-user mode, every request carries a verified
-`user_id`:
-
-```python
-async def _execute(self, params, context, event_queue):
-    user_id = params["user_id"]   # verified by the base class; never spoofable
-```
-
-Signing is RS256 only, so this agent never needs (or should have) a private
-key — only `JWKS_URL` or `USER_IDENTITY_PUBLIC_KEY`. Prefer `JWKS_URL` pointed
-at the platform backend: platforms with an admin UI can generate, activate,
-and retire signing keys through Postgres, and only `JWKS_URL` picks that up
-automatically (a static `USER_IDENTITY_PUBLIC_KEY` needs manual updating after
-every rotation). Generate/inspect keys with `prometheus-identity-keygen`
-(ships in `prometheus_api`, already installed in this image) or `openssl`.
-See
-[TUTORIAL.md](https://github.inl.gov/genesis/prometheus_platform/blob/dev/agent-template/TUTORIAL.md#verifying-which-platform-user-is-calling-you-multi-user-identity)
-and
-[Identity Key Management](https://github.inl.gov/genesis/prometheus_platform/blob/dev/sdk/docs/agent/IDENTITY_KEY_MANAGEMENT.md)
-for the full picture.
+Agent plumbing comes from the Prometheus agent template and SDK (Battelle Energy Alliance, MIT license; see the upstream LICENSE/NOTICE). Deterministic table matching and plotting logic were implemented for this challenge. Plotting uses Matplotlib; CSV parsing uses Python's standard library. The Hollowmere and lunar-cheese practice datasets come from the provided challenge materials.

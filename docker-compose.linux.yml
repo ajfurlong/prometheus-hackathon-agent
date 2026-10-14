@@ -1,4 +1,4 @@
 services:
-  markdown-table-extractor-agent:
+  team1-table-plot-agent:
     extra_hosts:
       - "host.docker.internal:host-gateway"

@@ -1,0 +1,31 @@
+id: team1.extract_then_plot
+name: Extract and plot a document table
+version: "1.0.0"
+description: Find a captioned table in a Markdown upload, extract it, then plot the requested columns. Use for requests to extract a table and plot its data.
+inputs:
+  required: [document_artifact_id, table_query, plot_query]
+  optional: [x_column, y_columns, chart_type]
+steps:
+  - id: extract
+    skill_id: team1_extract_table
+    params:
+      document_artifact_id: {from: input.document_artifact_id}
+      table_query: {from: input.table_query}
+    outputs:
+      - {to_context: table_artifact_id, from: artifact_id}
+  - id: plot
+    skill_id: team1_plot_table
+    depends_on: [extract]
+    is_final: true
+    params:
+      table_artifact_id: {from: context.table_artifact_id}
+      plot_query: {from: input.plot_query}
+      x_column: {from: input.x_column, optional: true}
+      y_columns: {from: input.y_columns, optional: true}
+      chart_type: {from: input.chart_type, optional: true}
+outputs:
+  final: {from: step.plot.result}
+metadata:
+  owner: team1-table-plot-agent
+  requires_approval: false
+  estimated_duration_seconds: 20
